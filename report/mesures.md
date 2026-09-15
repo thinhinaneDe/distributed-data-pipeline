@@ -83,6 +83,24 @@ Comparé au mardi 4 août (24h) : `41952905` octets (~42,0 Mo/jour).
 Même unité des deux côtés : ~24,5-24,8 Mo/jour de week-end contre ~42,0
 Mo/jour de semaine.
 
+Même comparaison en nombre d'événements (plus parlant que les octets) :
+
+```bash
+for d in 20260804 20260808 20260809; do
+  echo -n "$d : "; cat data/raw/$d*.export.CSV | wc -l
+done
+```
+
+| Jour | Événements | % du mardi |
+|---|---|---|
+| mardi 4 août (semaine) | 102 313 | 100 % |
+| samedi 8 août | 65 273 | 63,8 % |
+| dimanche 9 août | 54 796 | 53,6 % |
+
+Le dimanche est plus creux que le samedi — un gradient que la mesure en
+octets (qui regroupait les deux jours de week-end ensemble) ne faisait pas
+apparaître.
+
 Interprétation : GDELT mesure la couverture de presse mondiale, pas
 l'activité du monde — la baisse le week-end reflète la baisse de production
 journalistique, pas une baisse d'événements réels.
