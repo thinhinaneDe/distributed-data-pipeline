@@ -1,0 +1,30 @@
+# Instructions de travail internes — pas dans le dépôt public
+CLAUDE.md
+
+# Données — jamais versionnées
+data/*
+!data/.gitkeep
+
+# Environnement virtuel
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Sorties Spark / logs
+*.log
+spark-warehouse/
+derby.log
+metastore_db/
+
+# Éditeurs / OS
+.vscode/
+.idea/
+.DS_Store
