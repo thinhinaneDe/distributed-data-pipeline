@@ -152,3 +152,79 @@ Interprétation : enregistrements anciens rediffusés dans le flux du jour,
 placés en tête de fichier par tri d'ID. Volume négligeable (0,03 %), mais à
 traiter par un filtre de fenêtre temporelle documenté plutôt qu'ignoré
 silencieusement.
+
+## Schéma et complétude des colonnes — 15 septembre 2026
+
+Schéma explicite des 61 colonnes défini dans `src/schema.py`, vérifié en
+mode `FAILFAST` (Spark lève une exception au premier écart entre les
+données et le type déclaré, au lieu de mettre à null en silence comme le
+mode `PERMISSIVE` par défaut).
+
+```bash
+python tests/check_schema.py 'data/raw/20260804*.export.CSV'
+```
+
+Périmètre : mardi 4 août 2026, journée complète (96 fichiers de 15 min).
+
+- Lecture en FAILFAST : aucune exception, donc aucune ligne du 4 août ne
+  contredit un type du schéma.
+- Lignes lues par Spark : **102 313**. Lignes comptées par `wc -l` sur les
+  96 fichiers : **102 313**. Comptes identiques.
+- Note d'exécution : un WARN Spark (`FileStreamSink`,
+  `FileNotFoundException` sur le chemin littéral contenant `*`) apparaît
+  dans les logs — c'est une vérification interne bénigne (Spark teste si le
+  chemin est un répertoire de checkpoint de streaming avant de résoudre le
+  glob normalement), sans effet sur le résultat ; confirmé par un code de
+  sortie 0 et les deux comptes identiques.
+
+Taux de null par colonne, journée complète (96 fichiers, 102 313 lignes) :
+
+| Colonne | Null | % |
+|---|---|---|
+| Actor2Type3Code | 102 271 | 100,0 % |
+| Actor1Type3Code | 102 241 | 99,9 % |
+| Actor2Religion2Code | 102 041 | 99,7 % |
+| Actor1Religion2Code | 101 989 | 99,7 % |
+| Actor2EthnicCode | 101 873 | 99,6 % |
+| Actor1EthnicCode | 101 756 | 99,5 % |
+| Actor2KnownGroupCode | 101 678 | 99,4 % |
+| Actor1KnownGroupCode | 101 435 | 99,1 % |
+| Actor2Religion1Code | 101 195 | 98,9 % |
+| Actor1Religion1Code | 101 018 | 98,7 % |
+| Actor2Type2Code | 100 436 | 98,2 % |
+| Actor1Type2Code | 99 754 | 97,5 % |
+| Actor2Type1Code | 68 897 | 67,3 % |
+| Actor2Geo_ADM2Code | 64 033 | 62,6 % |
+| Actor2CountryCode | 58 939 | 57,6 % |
+| Actor1Type1Code | 58 291 | 57,0 % |
+| ActionGeo_ADM2Code | 47 303 | 46,2 % |
+| Actor1CountryCode | 45 912 | 44,9 % |
+| Actor1Geo_ADM2Code | 44 850 | 43,8 % |
+| Actor2Geo_Fullname | 33 397 | 32,6 % |
+| Actor2Geo_Lat | 33 397 | 32,6 % |
+| Actor2Geo_Long | 33 391 | 32,6 % |
+| Actor2Geo_CountryCode | 33 387 | 32,6 % |
+| Actor2Geo_ADM1Code | 33 387 | 32,6 % |
+| Actor2Geo_FeatureID | 33 387 | 32,6 % |
+| Actor2Code | 31 451 | 30,7 % |
+| Actor2Name | 31 451 | 30,7 % |
+| Actor1Geo_Fullname | 12 608 | 12,3 % |
+| Actor1Geo_Lat | 12 608 | 12,3 % |
+| Actor1Geo_Long | 12 598 | 12,3 % |
+| Actor1Geo_CountryCode | 12 594 | 12,3 % |
+| Actor1Geo_ADM1Code | 12 594 | 12,3 % |
+| Actor1Geo_FeatureID | 12 594 | 12,3 % |
+| Actor1Code | 9 983 | 9,8 % |
+| Actor1Name | 9 983 | 9,8 % |
+| ActionGeo_Fullname | 2 896 | 2,8 % |
+| ActionGeo_Lat | 2 896 | 2,8 % |
+| ActionGeo_Long | 2 883 | 2,8 % |
+| ActionGeo_CountryCode | 2 880 | 2,8 % |
+| ActionGeo_ADM1Code | 2 880 | 2,8 % |
+| ActionGeo_FeatureID | 2 880 | 2,8 % |
+| Toutes les autres colonnes (ID, dates, EventCode/Base/Root, QuadClass, Goldstein, Num*, AvgTone, les trois Geo_Type, DATEADDED, SOURCEURL) | 0 | 0,0 % |
+
+Comparaison avec l'échantillon d'une seule tranche de 15 min (1er août,
+2 540 lignes, voir plus haut) : les proportions sont globalement stables
+d'un fichier à l'échelle d'une journée complète — pas d'effet d'échantillon
+visible sur ces taux de null.
