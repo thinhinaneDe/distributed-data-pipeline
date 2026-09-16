@@ -253,8 +253,8 @@ python src/benchmark.py --comparisons 1
 249 groupes identiques des deux côtés (contrôle de cohérence entre les deux
 sources). Run 1 plus lent que les suivants sur les deux formats : cache
 disque de l'OS pas encore chaud au premier passage, sur les deux formats.
-Parquet ~2,5x plus rapide et moins de tâches malgré un fichier source
-~27x plus petit (colonnes déjà prunées à l'écriture, pas de reparsing de
+Parquet ~2,5x plus rapide et moins de tâches grâce à un fichier source
+~28x plus petit (colonnes déjà prunées à l'écriture, pas de reparsing de
 texte tabulé à chaque lecture).
 
 ### Comparaison 2 — taille sur disque
@@ -268,9 +268,9 @@ python src/benchmark.py --comparisons 2
 | Format | Taille |
 |---|---|
 | CSV bruts | 1 107 421 246 octets (~1,11 Go) |
-| Parquet consolidé | 40 080 711 octets (~40,1 Mo) |
+| Parquet consolidé | 39 462 309 octets (~39,5 Mo) |
 
-Rapport ~27,6x : compression colonnaire Parquet + projection à 12 colonnes
+Rapport ~28,1x : compression colonnaire Parquet + projection à 12 colonnes
 sur les 61 d'origine.
 
 ### Comparaison 3 — cache vs projection dans `clean.py`
