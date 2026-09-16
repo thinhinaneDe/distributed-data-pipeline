@@ -228,3 +228,87 @@ Comparaison avec l'échantillon d'une seule tranche de 15 min (1er août,
 2 540 lignes, voir plus haut) : les proportions sont globalement stables
 d'un fichier à l'échelle d'une journée complète — pas d'effet d'échantillon
 visible sur ces taux de null.
+
+## Benchmarks — 16 septembre 2026
+
+Trois questions avant de figer `clean.py`, mesurées via `src/benchmark.py`,
+en local[*] sur la même machine, jamais de cluster.
+
+### Comparaison 1 — effet de la consolidation Parquet
+
+Même agrégation (comptage d'événements par `ActionGeo_CountryCode`) sur les
+2880 CSV bruts (schéma explicite, FAILFAST) vs le Parquet consolidé. Trois
+exécutions par format pour voir la variabilité.
+
+```bash
+python src/benchmark.py --comparisons 1
+```
+
+| | CSV bruts | Parquet consolidé |
+|---|---|---|
+| run 1 | 14,77 s / 294 tâches / 97 partitions | 5,56 s / 204 tâches / 67 partitions |
+| run 2 | 8,44 s / 294 tâches / 97 partitions | 3,60 s / 204 tâches / 67 partitions |
+| run 3 | 8,22 s / 294 tâches / 97 partitions | 3,16 s / 204 tâches / 67 partitions |
+
+249 groupes identiques des deux côtés (contrôle de cohérence entre les deux
+sources). Run 1 plus lent que les suivants sur les deux formats : cache
+disque de l'OS pas encore chaud au premier passage, sur les deux formats.
+Parquet ~2,5x plus rapide et moins de tâches malgré un fichier source
+~27x plus petit (colonnes déjà prunées à l'écriture, pas de reparsing de
+texte tabulé à chaque lecture).
+
+### Comparaison 2 — taille sur disque
+
+```bash
+python src/benchmark.py --comparisons 2
+```
+
+Équivalent interne à `du -sb data/raw` et `du -sb data/processed/events`.
+
+| Format | Taille |
+|---|---|
+| CSV bruts | 1 107 421 246 octets (~1,11 Go) |
+| Parquet consolidé | 40 080 711 octets (~40,1 Mo) |
+
+Rapport ~27,6x : compression colonnaire Parquet + projection à 12 colonnes
+sur les 61 d'origine.
+
+### Comparaison 3 — cache vs projection dans `clean.py`
+
+Question initiale : l'ordre de l'ancien `clean.py` (cache → count → select)
+coûte-t-il ou aide-t-il ? Un premier essai à deux variantes (cache avant
+select sur 61 colonnes vs sans cache après select sur 12 colonnes) confond
+deux causes possibles — présence du cache et largeur des données mises en
+cache. Ajout d'une troisième variante isolant le cache seul (même largeur,
+12 colonnes, des deux côtés) pour trancher.
+
+```bash
+python src/benchmark.py --comparisons 3
+```
+
+| Variante | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| cache avant select, 61 colonnes (ancien `clean.py`) | 102,65 s | 68,87 s | 65,00 s |
+| select puis cache, 12 colonnes | 25,81 s | 23,11 s | 20,53 s |
+| select → count, sans cache | 23,90 s | 17,36 s | 18,07 s |
+
+Taille réelle du bloc caché (`spark.sparkContext._jsc.sc().getRDDStorageInfo()`),
+`spark.driver.memory` non fixé explicitement (défaut Spark : 1 Go) :
+
+| Variante | mémoire | disque | |
+|---|---|---|---|
+| cache avant select, 61 colonnes | 438-447 Mo | 134-142 Mo | **spill disque** |
+| cache après select, 12 colonnes | 80 Mo | 0 | tout en mémoire |
+
+Interprétation : la lenteur de l'ancien `clean.py` n'est pas due au cache en
+soi, mais au fait de cacher 61 colonnes (~440 Mo) sous un driver à 1 Go par
+défaut — ça dépasse la mémoire de stockage disponible et force un spill sur
+disque (~140 Mo), plus coûteux qu'un second passage disque profitant du
+cache OS déjà chaud. Une fois la projection faite avant le cache (12
+colonnes, 80 Mo), tout tient en mémoire et le cache devient quasi gratuit,
+proche du temps sans cache — la variante "select puis cache" est proche de
+"sans cache", pas de "cache 61 colonnes".
+
+Décision : `clean.py` projette désormais les 12 colonnes avant tout
+comptage, sans cache — la variante la plus rapide, la plus simple, et
+indépendante d'un réglage de `spark.driver.memory`.
