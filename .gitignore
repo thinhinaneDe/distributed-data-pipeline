@@ -5,6 +5,15 @@ CLAUDE.md
 data/*
 !data/.gitkeep
 
+# Exception : tables de référence statiques (~8 Ko à elles deux),
+# nécessaires à transform.py et non téléchargées par aucun script (voir
+# README section 2 pour la provenance et la date de récupération). Ce ne
+# sont pas "le dataset" au sens de la règle ci-dessus : deux petites
+# tables de correspondance de codes, comparables au contenu déjà encodé
+# en dur dans src/cameo_country_types.py.
+!data/reference/
+!data/reference/*.txt
+
 # Environnement virtuel
 venv/
 .venv/
