@@ -545,9 +545,56 @@ FIPS actuel de la Serbie) — c'est notre `FIPS.country.txt` qui n'a
 qu'une entrée par pays (RI) quand GDELT en émet plusieurs pour le même
 pays selon la version du géocodeur ou l'ancienneté de l'événement source.
 Un vrai correctif demanderait une table de correspondance RB/YI -> RI,
-pas un simple ajout de ligne comme pour SSD — non fait ici : mesure et
-diagnostic seulement, décision de correction laissée à l'auteur du
-pipeline.
+pas un simple ajout de ligne comme pour SSD.
+
+### Normalisation RB/YI -> RI, 18 septembre 2026
+
+Décision : RB et YI normalisés vers RI, dans un petit dictionnaire dédié
+`src/fips_country_aliases.py` (même logique que `cameo_country_types.py`
+pour SSD : une correction de projet écrite en code, pas une modification
+du fichier de référence téléchargé). OC reste volontairement en dehors
+de ce dictionnaire et continue à ne pas matcher la table FIPS : ce n'est
+pas un pays (voir ci-dessus, "haute mer"), l'exclure de la jointure de
+l'axe 1 est correct, pas un trou à corriger.
+
+`transform.py` applique la normalisation sur ActionGeo_CountryCode avant
+la jointure FIPS de l'axe 1. Effet mesuré, avant/après, sur le Parquet
+consolidé (`data/processed/events`) :
+
+Événements Serbie (RI) avant normalisation : 1 420
+Événements Serbie (RI) après normalisation (RB + YI regroupés) : 2 941
+Récupérés par la normalisation : 1 521 (soit +107% par rapport aux 1 420
+comptés sous RI seul — la majorité des événements Serbie du corpus
+étaient donc perdus par la jointure interne de l'axe 1 avant ce
+correctif, pas une poignée marginale)
+
+Effet sur le taux de correspondance global de l'axe 1 : 99,935% avant
+(1 684 non appariés sur RB/OC/YI) -> 99,994% après (163 non appariés,
+uniquement OC, laissé tel quel par choix). Les 1 521 lignes récupérées
+correspondent exactement à RB (1 457) + YI (64) mesurés précédemment :
+aucune perte, aucun double comptage.
+
+### Limite de cette détection — non exhaustive
+
+RB et YI ont été trouvés uniquement parce qu'ils ne matchaient AUCUNE
+entrée de `FIPS.country.txt` — ils sont apparus dans le bucket "non
+apparié" de `measure_match_rate()`, qu'il a donc fallu examiner
+manuellement (awk sur les CSV bruts) pour comprendre.
+
+Cette méthode ne peut pas détecter le cas où un pays émettrait deux codes
+FIPS distincts qui matchent chacun une entrée DIFFÉRENTE de
+`FIPS.country.txt` — par exemple si `FIPS.country.txt` contenait par
+erreur ou par mise à jour deux lignes pour un même pays sous deux codes
+(cas hypothétique ici, mais structurellement possible pour n'importe quel
+pays ayant changé de code FIPS au fil du temps, comme la Serbie).
+Dans ce cas, aucune ligne ne serait non appariée : la jointure de l'axe 1
+réussirait des deux côtés, silencieusement, et le pays serait compté deux
+fois sous deux codes différents dans les agrégations. Rien dans ce
+pipeline — ni `measure_match_rate()`, ni aucune autre mesure de
+`transform.py` — ne peut détecter ce cas, puisqu'il ne produit aucune
+ligne non appariée à examiner. Seule une revue manuelle de
+`FIPS.country.txt` (chercher des noms de pays en double, pas des codes en
+double) pourrait le révéler, non faite ici.
 
 ## Décomposition de l'exclusion du filtre entity_type — axe 2 — 17 septembre 2026
 
