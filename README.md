@@ -86,7 +86,11 @@ en cours de route plutôt que supposées.
      `Actor2CountryCode` (CAMEO) rapprochés de la classification
      manuelle de `src/cameo_country_types.py` (pays / région /
      territoire), filtrés à `entity_type == "pays"` des deux côtés
-     (21,4 % conservés, taux affiché, pas appliqué en silence).
+     (21,4 % conservés, taux affiché, pas appliqué en silence). Les
+     paires domestiques (`Actor1CountryCode == Actor2CountryCode`) sont
+     ensuite exclues de l'analyse des interactions entre pays
+     différents, qui porte donc sur environ 15,6 % du corpus initial
+     une fois les deux filtres combinés.
 5. **Benchmark** (`src/benchmark.py`) : cinq comparaisons mesurées et
    consignées dans `report/mesures.md` — voir sections 4 et 5.
 
@@ -129,6 +133,7 @@ machine à 7,6 Go de RAM).
 | Broadcast hash join explicite vs sort-merge forcé (même jointure) | ~4,8 s / 143 tâches vs ~5,4 s / 228 tâches, en régime stable |
 | Normalisation FIPS (RB, YI → RI), axe 1 | 1 420 → 2 941 événements Serbie (+1 521) |
 | Filtre `entity_type == "pays"`, axe 2 | 572 425 conservés sur 2 675 819 (21,4 %) |
+| Paires domestiques (Actor1 == Actor2), axe 2 | 27,2 % des événements du corpus filtré, 186 paires sur 9595 |
 | Effet week-end | 102 313 événements le mardi 4 août contre 54 796 le dimanche 9 |
 | Rétrospection médiatique | 17 213 événements datés d'un an plus tôt, ~700/jour, uniformément répartis |
 
