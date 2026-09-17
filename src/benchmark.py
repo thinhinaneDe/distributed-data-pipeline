@@ -1,6 +1,6 @@
 """Benchmarks exploratoires PySpark, avant décision sur clean.py et transform.py.
 
-Quatre comparaisons indépendantes, chacune sur plusieurs exécutions pour
+Cinq comparaisons indépendantes, chacune sur plusieurs exécutions pour
 observer la variabilité (JVM déjà chaude, cache disque de l'OS déjà chaud)
 plutôt qu'un chiffre unique qui la masquerait :
 
@@ -13,6 +13,14 @@ plutôt qu'un chiffre unique qui la masquerait :
    broadcast hash join explicite. Comparé ici à un sort-merge join forcé
    (spark.sql.autoBroadcastJoinThreshold = -1), pour vérifier que le choix
    n'est pas seulement défendable en théorie mais mesurablement plus rapide.
+5. pandas vs PySpark, même agrégation que la comparaison 1, sur les CSV
+   bruts, à 1%/10%/100% du corpus. À la différence des comparaisons 1-4,
+   exécutée dans des sous-processus isolés (voir pandas_benchmark_worker.py
+   et spark_benchmark_worker.py) : mesure de pic mémoire propre à chaque
+   run côté pandas, et JVM froide (pas la SparkSession partagée du reste
+   de ce fichier) côté Spark, pour que le coût de démarrage fasse partie
+   du chronomètre — condition nécessaire pour répondre à la question du
+   seuil de volumétrie.
 
 N'écrit rien dans report/mesures.md : affichage console seulement, la
 décision de consigner ou non revient à l'auteur du pipeline.
@@ -20,9 +28,12 @@ décision de consigner ou non revient à l'auteur du pipeline.
 
 import argparse
 import contextlib
+import glob
 import io
+import json
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -239,6 +250,86 @@ def compare_broadcast_strategy(spark: SparkSession, parquet_dir: str, n_runs: in
     spark.conf.set("spark.sql.autoBroadcastJoinThreshold", default_threshold)
 
 
+def files_for_volumetry(raw_pattern: str, pct: float) -> list:
+    """Sélectionne les N premiers fichiers (tri chronologique) pour une volumétrie donnée.
+
+    Sous-ensemble de fichiers plutôt qu'échantillonnage aléatoire de
+    lignes : reproductible, et mesure un vrai coût d'E/S à petite
+    volumétrie plutôt que de supposer que tout a déjà été lu en mémoire.
+    """
+    all_files = sorted(glob.glob(raw_pattern))
+    n = max(1, round(len(all_files) * pct))
+    return [str(Path(p).resolve()) for p in all_files[:n]]
+
+
+def run_worker(cmd: list, timeout: int) -> dict:
+    """Exécute un sous-processus worker et normalise son résultat.
+
+    Distingue trois échecs plutôt qu'un seul "ça a planté" : timeout
+    (probable swap thrashing, aucun message d'erreur à donner), tué par
+    signal (probable OOM killer du noyau, aucun message d'erreur Python
+    récupérable), et exception Python normale (message d'erreur exact
+    disponible dans stderr).
+    """
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout"}
+
+    if result.returncode < 0:
+        return {"status": "killed", "signal": -result.returncode}
+    if result.returncode != 0:
+        return {"status": "error", "output": result.stdout + result.stderr}
+
+    return {"status": "ok", **json.loads(result.stdout.strip().splitlines()[-1])}
+
+
+def compare_pandas_vs_spark(raw_pattern: str, volumetries: list, timeout: int) -> None:
+    """Comparaison 5 : pandas vs PySpark, même agrégation que la comparaison 1, à plusieurs volumétries.
+
+    Voir les docstrings de pandas_benchmark_worker.py et
+    spark_benchmark_worker.py pour le détail de l'isolation par
+    sous-processus.
+    """
+    print("\n=== Comparaison 5 : pandas vs PySpark, plusieurs volumétries ===")
+    src_dir = Path(__file__).resolve().parent
+    pandas_worker = str(src_dir / "pandas_benchmark_worker.py")
+    spark_worker = str(src_dir / "spark_benchmark_worker.py")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for pct in volumetries:
+            files = files_for_volumetry(raw_pattern, pct)
+            list_file = str(Path(tmpdir) / f"files_{pct}.txt")
+            with open(list_file, "w") as f:
+                f.write("\n".join(files))
+
+            print(f"\n--- Volumétrie {100 * pct:g}% ({len(files)} fichiers) ---")
+
+            spark_result = run_worker([sys.executable, spark_worker, list_file], timeout)
+            if spark_result["status"] == "ok":
+                print(f"Spark (froid) : {spark_result['elapsed_s']:.2f}s, {spark_result['n_groups']} groupes")
+            else:
+                print(f"Spark (froid) : ÉCHEC ({spark_result['status']})")
+                if spark_result["status"] == "error":
+                    print(spark_result["output"])
+
+            pandas_result = run_worker([sys.executable, pandas_worker, list_file], timeout)
+            if pandas_result["status"] == "ok":
+                peak_mb = pandas_result["peak_rss_kb"] / 1024
+                print(f"pandas        : {pandas_result['elapsed_s']:.2f}s, {pandas_result['n_groups']} groupes, pic mémoire {peak_mb:.1f} Mo")
+            elif pandas_result["status"] == "timeout":
+                print(f"pandas        : ÉCHEC (timeout {timeout}s dépassé — probable swap thrashing sous pression mémoire, pas d'exception Python à rapporter)")
+            elif pandas_result["status"] == "killed":
+                print(f"pandas        : ÉCHEC (tué par signal {pandas_result['signal']} — probable OOM killer du noyau, aucun message d'erreur Python récupérable)")
+            else:
+                print("pandas        : ÉCHEC")
+                print(pandas_result["output"])
+
+            if spark_result["status"] == "ok" and pandas_result["status"] == "ok":
+                if spark_result["n_groups"] != pandas_result["n_groups"]:
+                    print(f"ATTENTION : {spark_result['n_groups']} groupes côté Spark vs {pandas_result['n_groups']} côté pandas — pas de contrôle de cohérence possible")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-pattern", default="data/raw/*.export.CSV")
@@ -248,25 +339,41 @@ def main() -> None:
     parser.add_argument("--end", type=int, default=20260830, help="SQLDATE maximum inclus (YYYYMMDD)")
     parser.add_argument("--n-runs", type=int, default=3)
     parser.add_argument(
+        "--volumetries",
+        default="0.01,0.10,1.0",
+        help="Fractions du corpus pour la comparaison 5, ex. '0.01,0.10,1.0'",
+    )
+    parser.add_argument(
+        "--pandas-timeout",
+        type=int,
+        default=600,
+        help="Timeout en secondes pour chaque sous-processus de la comparaison 5",
+    )
+    parser.add_argument(
         "--comparisons",
-        default="1,2,3,4",
+        default="1,2,3,4,5",
         help="Sous-ensemble à exécuter, ex. '1,3'",
     )
     args = parser.parse_args()
     selected = set(args.comparisons.split(","))
 
-    spark = SparkSession.builder.master("local[*]").appName("gdelt-benchmark").getOrCreate()
+    if selected - {"5"}:
+        spark = SparkSession.builder.master("local[*]").appName("gdelt-benchmark").getOrCreate()
 
-    if "1" in selected:
-        compare_consolidation(spark, args.input_pattern, args.parquet_dir, args.n_runs)
-    if "2" in selected:
-        compare_disk_size(args.raw_dir, args.parquet_dir)
-    if "3" in selected:
-        compare_cache_strategy(spark, args.input_pattern, args.start, args.end, args.n_runs)
-    if "4" in selected:
-        compare_broadcast_strategy(spark, args.parquet_dir, args.n_runs)
+        if "1" in selected:
+            compare_consolidation(spark, args.input_pattern, args.parquet_dir, args.n_runs)
+        if "2" in selected:
+            compare_disk_size(args.raw_dir, args.parquet_dir)
+        if "3" in selected:
+            compare_cache_strategy(spark, args.input_pattern, args.start, args.end, args.n_runs)
+        if "4" in selected:
+            compare_broadcast_strategy(spark, args.parquet_dir, args.n_runs)
 
-    spark.stop()
+        spark.stop()
+
+    if "5" in selected:
+        volumetries = [float(v) for v in args.volumetries.split(",")]
+        compare_pandas_vs_spark(args.input_pattern, volumetries, args.pandas_timeout)
 
 
 if __name__ == "__main__":
