@@ -1,6 +1,6 @@
-"""Benchmarks exploratoires PySpark, avant décision sur clean.py.
+"""Benchmarks exploratoires PySpark, avant décision sur clean.py et transform.py.
 
-Trois comparaisons indépendantes, chacune sur plusieurs exécutions pour
+Quatre comparaisons indépendantes, chacune sur plusieurs exécutions pour
 observer la variabilité (JVM déjà chaude, cache disque de l'OS déjà chaud)
 plutôt qu'un chiffre unique qui la masquerait :
 
@@ -9,12 +9,18 @@ plutôt qu'un chiffre unique qui la masquerait :
 2. Taille sur disque des deux formats (`du -sb`).
 3. Dans clean.py, l'ordre actuel est cache -> count -> select. Comparé ici à
    select -> count sans cache, pour savoir si le cache aide ou coûte.
+4. Dans transform.py, la jointure Actor1CountryCode -> table CAMEO est en
+   broadcast hash join explicite. Comparé ici à un sort-merge join forcé
+   (spark.sql.autoBroadcastJoinThreshold = -1), pour vérifier que le choix
+   n'est pas seulement défendable en théorie mais mesurablement plus rapide.
 
 N'écrit rien dans report/mesures.md : affichage console seulement, la
 décision de consigner ou non revient à l'auteur du pipeline.
 """
 
 import argparse
+import contextlib
+import io
 import subprocess
 import sys
 import time
@@ -23,8 +29,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
+from pyspark.sql.functions import broadcast, col
 
+from cameo_country_types import CAMEO_COUNTRY_TYPES
 from clean import KEPT_COLUMNS
 from ingest import read_gdelt_events
 
@@ -177,6 +184,61 @@ def compare_cache_strategy(spark: SparkSession, raw_pattern: str, start: int, en
             print(f"run {i} : {elapsed:.2f}s, {n_tasks} tâches, total={total}, conservées={kept}")
 
 
+def compare_broadcast_strategy(spark: SparkSession, parquet_dir: str, n_runs: int) -> None:
+    """Comparaison 4 : broadcast hash join explicite vs sort-merge forcé.
+
+    Même jointure dans les deux cas (Actor1CountryCode -> table CAMEO, 262
+    codes) ; seule la stratégie change. Le sort-merge est forcé via
+    spark.sql.autoBroadcastJoinThreshold = -1 (désactive le broadcast
+    automatique de Catalyst) plutôt que comparé à un hint absent : sans ce
+    forçage, Catalyst broadcasterait de toute façon la petite table (262
+    lignes très sous le seuil par défaut de 10 Mo), et on ne mesurerait
+    rien de plus que la même stratégie exécutée deux fois.
+
+    Le plan physique (.explain()) est capturé via redirect_stdout plutôt
+    que via une API dédiée : PySpark 4.2 n'expose pas de version qui
+    renvoie directement une chaîne, .explain() écrit toujours sur stdout.
+    """
+    print("\n=== Comparaison 4 : broadcast explicite vs sort-merge forcé ===")
+    types_df = spark.createDataFrame(
+        [(code, etype) for code, (_, etype) in CAMEO_COUNTRY_TYPES.items()],
+        ["code", "entity_type"],
+    )
+    default_threshold = spark.conf.get("spark.sql.autoBroadcastJoinThreshold")
+
+    strategies = [
+        ("broadcast explicite", True, default_threshold),
+        ("sort-merge forcé (autoBroadcastJoinThreshold=-1)", False, "-1"),
+    ]
+
+    for label, use_broadcast, threshold in strategies:
+        spark.conf.set("spark.sql.autoBroadcastJoinThreshold", threshold)
+        print(f"\n--- {label} ---")
+        for i in range(1, n_runs + 1):
+            events = spark.read.parquet(parquet_dir)
+            ref = broadcast(types_df) if use_broadcast else types_df
+            joined = events.join(ref, events["Actor1CountryCode"] == ref["code"], "inner")
+
+            if i == 1:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    joined.explain(mode="extended")
+                plan = buf.getvalue()
+                join_kind = "BroadcastHashJoin" if "BroadcastHashJoin" in plan else (
+                    "SortMergeJoin" if "SortMergeJoin" in plan else "autre"
+                )
+                has_shuffle = "Exchange hashpartitioning" in plan
+                print(f"    plan (run 1) : {join_kind}, {'shuffle (Exchange hashpartitioning) présent' if has_shuffle else 'aucun shuffle'}")
+
+            def action(joined=joined):
+                return joined.count()
+
+            n_matched, elapsed, n_tasks = run_action_and_measure(spark, action)
+            print(f"run {i} : {elapsed:.2f}s, {n_tasks} tâches, {n_matched} lignes appariées")
+
+    spark.conf.set("spark.sql.autoBroadcastJoinThreshold", default_threshold)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-pattern", default="data/raw/*.export.CSV")
@@ -187,7 +249,7 @@ def main() -> None:
     parser.add_argument("--n-runs", type=int, default=3)
     parser.add_argument(
         "--comparisons",
-        default="1,2,3",
+        default="1,2,3,4",
         help="Sous-ensemble à exécuter, ex. '1,3'",
     )
     args = parser.parse_args()
@@ -201,6 +263,8 @@ def main() -> None:
         compare_disk_size(args.raw_dir, args.parquet_dir)
     if "3" in selected:
         compare_cache_strategy(spark, args.input_pattern, args.start, args.end, args.n_runs)
+    if "4" in selected:
+        compare_broadcast_strategy(spark, args.parquet_dir, args.n_runs)
 
     spark.stop()
 

@@ -360,6 +360,56 @@ Décision : `clean.py` projette désormais les 12 colonnes avant tout
 comptage, sans cache — la variante la plus rapide, la plus simple, et
 indépendante d'un réglage de `spark.driver.memory`.
 
+### Comparaison 4 — broadcast explicite vs sort-merge forcé, 17 septembre 2026
+
+Avant d'écrire `transform.py` : les deux jointures de dimension (axe 1
+ActionGeo_CountryCode/FIPS, axe 2 Actor1/Actor2CountryCode/CAMEO) portent
+sur des tables de 274 et 262 lignes, quelques dizaines de Ko, contre 2,7 M
+de lignes côté événements. `transform.py` les broadcast explicitement
+plutôt que de laisser Catalyst décider seul via
+`spark.sql.autoBroadcastJoinThreshold` (10 Mo par défaut — ces tables
+seraient de toute façon broadcastées automatiquement). Mesure ici pour
+vérifier que ce choix n'est pas qu'une préférence de lisibilité : même
+jointure (Actor1CountryCode -> table CAMEO), broadcast explicite contre
+sort-merge forcé (seuil mis à -1 pour désactiver le broadcast automatique
+et obtenir un vrai sort-merge, pas la même stratégie mesurée deux fois).
+
+```bash
+python src/benchmark.py --comparisons 4
+```
+
+Plan (`.explain()`, run 1 de chaque stratégie) : broadcast explicite ->
+`BroadcastHashJoin`, aucun shuffle. Sort-merge forcé -> `SortMergeJoin`,
+shuffle présent (`Exchange hashpartitioning`).
+
+Broadcast explicite : run 1 11,93 s / 143 tâches, run 2 5,31 s / 143
+tâches, run 3 4,29 s / 143 tâches. 1 483 939 lignes appariées, identique
+sur les trois runs.
+
+Sort-merge forcé : run 1 7,43 s / 228 tâches, run 2 5,61 s / 228 tâches,
+run 3 5,12 s / 228 tâches. Mêmes 1 483 939 lignes appariées.
+
+Run 1 plus lent des deux côtés (JIT/codegen Catalyst pas encore chaud,
+comme en comparaison 1) donc peu informatif seul ; en régime stable (runs
+2 et 3), broadcast explicite ~4,8 s en moyenne contre ~5,4 s pour
+sort-merge forcé, soit un écart modeste (~10-15 %) mais net et
+systématique. L'écart de tâches est plus parlant que l'écart de temps :
+228 contre 143, soit 85 tâches de shuffle en plus (lecture + écriture
+d'échange) pour repartitionner par hachage une table de faits qu'il
+n'était pas nécessaire de repartitionner. En local[*], ce shuffle reste
+un échange sur disque local dans la même JVM, pas un aller-retour réseau
+entre machines — c'est pourquoi l'écart de temps reste modeste ici ; sur
+un vrai cluster, le même `Exchange hashpartitioning` impliquerait une
+sérialisation et un transfert réseau entre exécuteurs, et l'écart se
+creuserait nettement plus.
+
+Décision : broadcast explicite conservé dans `transform.py` pour les deux
+axes — gain mesuré et net en tâches (donc en travail réellement effectué
+par Spark), gain de temps plus modeste en local[*] mais qui s'aggraverait
+sur cluster, et choix qui reste correct même si une table de référence
+grossissait au-delà du seuil de 10 Mo, ce que le broadcast automatique
+seul ne garantirait pas.
+
 ## Typologie des codes acteurs — 17 septembre 2026
 
 CAMEO.country.txt mélange sous un même référentiel de 261 codes à 3
@@ -446,3 +496,118 @@ de CAMEO.country.txt.
 
 Décision de filtrage par défaut non prise ici : mesure seule, comme
 demandé.
+
+## Couverture géographique — axe 1, FIPS — 17 septembre 2026
+
+`transform.py` mesure la jointure ActionGeo_CountryCode -> FIPS.country.txt :
+2 595 904 lignes avec ActionGeo_CountryCode renseigné, 2 594 220 appariées
+(99,935%), 1 684 non appariées (0,065%) sur 3 codes distincts : RB (1 457
+occurrences), OC (163), YI (64). Recherche menée avant d'écrire quoi que ce
+soit (Wikipedia FIPS 10-4, puis vérification directe sur les CSV bruts pour
+ne pas se fier à une recherche seule) :
+
+```bash
+awk -F'\t' '$54=="OC" {print $53, "| type="$52}' data/raw/*.export.CSV | sort | uniq -c | sort -rn
+awk -F'\t' '$54=="RB" {print $53, "| type="$52}' data/raw/*.export.CSV | sort | uniq -c | sort -rn
+awk -F'\t' '$54=="YI" {print $53, "| type="$52}' data/raw/*.export.CSV | sort | uniq -c | sort -rn
+```
+
+(colonnes 52/53/54 = ActionGeo_Type / ActionGeo_Fullname / ActionGeo_CountryCode,
+positions comptées dans `src/schema.py`.)
+
+**OC** — 164 occurrences, ActionGeo_Fullname toujours "Indian Ocean",
+"Pacific Ocean" ou "Atlantic Ocean", ActionGeo_Type = 4 (niveau
+ville/point, pas pays). Pas une omission de la table FIPS : OC n'est pas
+un code FIPS 10-4 du tout, c'est une extension du géocodeur de GDELT pour
+placer un événement en haute mer, où aucun code pays n'a de sens. Une
+recherche seule (sans vérifier les données) aurait fait conclure à tort
+"OC = Océanie" (résultat obtenu via web search) — l'échantillon réel
+contredit cette hypothèse et confirme l'importance de vérifier avant
+d'écrire.
+
+**RB** et **YI** — les deux désignent la Serbie, à deux époques du
+référentiel FIPS 10-4 : YI = "Serbia and Montenegro" (code retiré en 2006
+à la scission), RB = code de la Serbie seule après scission. Confirmé sur
+l'échantillon : RB pointe vers "Belgrade, Serbia" (1 049 occurrences) et
+des lignes de niveau pays sans nom (413) ; YI vers des lignes de niveau
+pays sans nom (64, cohérent avec un code obsolète que le géocodeur émet
+encore par endroits). Mais `data/reference/FIPS.country.txt` utilise ni
+RB ni YI pour la Serbie : il contient `RI	Serbia` — une troisième
+variante. Vérification : RI est bien utilisé par ailleurs dans les CSV
+bruts (1 439 occurrences), donc GDELT émet les **trois** codes (RI, RB,
+YI) pour le même pays selon les événements, sans cohérence interne, et
+seul RI est couvert par notre table de référence.
+
+Nature du trou, différente de SSD (Typologie des codes acteurs) : SSD
+était une entrée manquante (pays jamais ajouté au référentiel). Ici,
+RB/YI ne manquent pas au référentiel FIPS 10-4 en général (RB est le code
+FIPS actuel de la Serbie) — c'est notre `FIPS.country.txt` qui n'a
+qu'une entrée par pays (RI) quand GDELT en émet plusieurs pour le même
+pays selon la version du géocodeur ou l'ancienneté de l'événement source.
+Un vrai correctif demanderait une table de correspondance RB/YI -> RI,
+pas un simple ajout de ligne comme pour SSD — non fait ici : mesure et
+diagnostic seulement, décision de correction laissée à l'auteur du
+pipeline.
+
+## Décomposition de l'exclusion du filtre entity_type — axe 2 — 17 septembre 2026
+
+Le filtre `entity_type == "pays"` sur Actor1CountryCode ET
+Actor2CountryCode (axe 2, `transform.py`) ne conserve que 572 425
+événements sur 2 675 819 (21,393%), très en dessous des 53,08% de
+"pays" mesurés sur Actor1 seul (section Typologie des codes acteurs) :
+un filtre sur deux colonnes indépendantes ne peut être déduit d'un
+filtre sur une seule. Décomposition par côté responsable de
+l'exclusion :
+
+```bash
+python3 - << 'PY'
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+from cameo_country_types import CAMEO_COUNTRY_TYPES
+
+spark = SparkSession.builder.master("local[*]").appName("decompose-exclusions").getOrCreate()
+events = spark.read.parquet("data/processed/events")
+types_df = spark.createDataFrame(
+    [(code, etype) for code, (_, etype) in CAMEO_COUNTRY_TYPES.items()],
+    ["code", "entity_type"],
+)
+a1 = types_df.toDF("a1_code", "a1_type")
+a2 = types_df.toDF("a2_code", "a2_type")
+joined = (
+    events
+    .join(a1, events["Actor1CountryCode"] == a1["a1_code"], "left")
+    .join(a2, events["Actor2CountryCode"] == a2["a2_code"], "left")
+)
+# ... filtres a1_type=="pays"/a2_type=="pays" combinés deux à deux, voir
+# report pour le détail des quatre bucket (conservés, exclus_a1_seul,
+# exclus_a2_seul, exclus_les_deux)
+PY
+```
+
+conservés (Actor1 et Actor2 "pays") : 572 425, 21,393% du total
+exclus par Actor1 seul (Actor1 non-pays, Actor2 "pays") : 516 148,
+19,289% du total, 24,539% des exclusions
+exclus par Actor2 seul (Actor2 non-pays, Actor1 "pays") : 848 970,
+31,727% du total, 40,362% des exclusions
+exclus par les deux (Actor1 et Actor2 non-pays) : 738 276, 27,591%
+du total, 35,099% des exclusions
+somme de contrôle : 572 425 + 516 148 + 848 970 + 738 276 = 2 675 819,
+identique au total d'événements.
+
+Réponse à la question posée : Actor2CountryCode vide n'écrase pas *tout*
+à lui seul, mais c'est le facteur dominant. Décomposé par cause côté
+Actor2 (region/territoire/null) sur les 1 587 246 lignes où Actor2 n'est
+pas "pays" : null à 96,296% (1 528 447 occurrences), le reste
+négligeable. Même décomposition côté Actor1 sur 1 254 424 lignes non-pays :
+null à 95,014% (1 191 880). Actor2CountryCode est vide sur 57,121% de
+tous les événements contre 44,543% pour Actor1CountryCode (cohérent avec
+le codebook GDELT : un événement peut n'avoir qu'un seul acteur identifié,
+Actor2 est structurellement moins souvent renseigné qu'Actor1). Ce
+différentiel de 12,6 points explique l'essentiel de l'écart entre
+exclus_actor1_seul (516 148) et exclus_actor2_seul (848 970). Mais le
+bucket "exclus par les deux" (738 276, 27,591% du total) reste le
+deuxième contributeur, pas négligeable : une part substantielle des
+événements manque des deux côtés à la fois plutôt que d'un seul,
+cohérence attendue si l'absence d'acteur identifié tient à la nature de
+l'article source (dépêche factuelle sans acteurs nommés) plutôt qu'à un
+défaut indépendant sur chaque colonne.
