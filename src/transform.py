@@ -26,6 +26,16 @@ signifie qu'aucun côté n'est repartitionné par la clé, donc rien à
 équilibrer sur cette étape (le skew possible sur la répartition des pays
 eux-mêmes, ex. les États-Unis dominant le volume, relève de l'agrégation
 qui suit, pas de la jointure).
+
+Avant la jointure FIPS de l'axe 1, ActionGeo_CountryCode est normalisé via
+fips_country_aliases.py : RB et YI (deux codes FIPS 10-4 alternatifs pour
+la Serbie, voir ce fichier et report/mesures.md) sont remplacés par RI, le
+seul code que data/reference/FIPS.country.txt contient pour ce pays. Sans
+ça, la jointure interne de l'axe 1 perdait silencieusement ces événements
+(inner join, code non apparié = ligne supprimée) plutôt que de les
+compter sous un pays erroné. OC (codes d'océan, pas un pays) reste
+volontairement en dehors de ce dictionnaire et continue à ne pas
+matcher : c'est le comportement correct, pas un trou à corriger.
 """
 
 import argparse
@@ -38,6 +48,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import avg, broadcast, col, count, when
 
 from cameo_country_types import CAMEO_COUNTRY_TYPES
+from fips_country_aliases import FIPS_COUNTRY_ALIASES
 
 
 def read_fips_countries(spark: SparkSession, path: str) -> DataFrame:
@@ -101,6 +112,19 @@ def measure_match_rate(df: DataFrame, code_col: str, ref: DataFrame, ref_code_co
         )
         for row in rows:
             print(f"  code non apparié {row[code_col]} : {row['count']} occurrences")
+
+
+def normalize_action_geo_country_code(events: DataFrame) -> DataFrame:
+    """Remplace les codes FIPS alternatifs de FIPS_COUNTRY_ALIASES par leur code canonique.
+
+    Chaîne de when()/otherwise() plutôt qu'une jointure : le dictionnaire
+    ne contient que 2 entrées, une jointure supplémentaire pour ça serait
+    plus de machinerie que le problème n'en demande.
+    """
+    expr = col("ActionGeo_CountryCode")
+    for alias, canonical in FIPS_COUNTRY_ALIASES.items():
+        expr = when(col("ActionGeo_CountryCode") == alias, canonical).otherwise(expr)
+    return events.withColumn("ActionGeo_CountryCode", expr)
 
 
 def build_action_geo_aggregates(events: DataFrame, fips: DataFrame) -> DataFrame:
@@ -171,8 +195,16 @@ def main() -> None:
     cameo_types = build_cameo_types_df(spark)
 
     print("=== Axe 1 : couverture par pays d'action (FIPS) ===")
-    measure_match_rate(events, "ActionGeo_CountryCode", fips, "fips_code", "ActionGeo_CountryCode -> FIPS")
-    action_geo = build_action_geo_aggregates(events, fips)
+    before_serbia = events.filter(col("ActionGeo_CountryCode") == "RI").count()
+    events_axis1 = normalize_action_geo_country_code(events)
+    after_serbia = events_axis1.filter(col("ActionGeo_CountryCode") == "RI").count()
+    print("--- Normalisation FIPS (RB, YI -> RI) ---")
+    print(f"Événements Serbie (RI) avant normalisation : {before_serbia}")
+    print(f"Événements Serbie (RI) après normalisation (RB + YI regroupés) : {after_serbia}")
+    print(f"Récupérés par la normalisation : {after_serbia - before_serbia}")
+
+    measure_match_rate(events_axis1, "ActionGeo_CountryCode", fips, "fips_code", "ActionGeo_CountryCode -> FIPS")
+    action_geo = build_action_geo_aggregates(events_axis1, fips)
     (
         action_geo.write
         .mode("overwrite")
