@@ -1,5 +1,13 @@
 # Pipeline de données distribuées (PySpark)
 
+Pipeline PySpark sur 2,7 M d'événements GDELT (1,1 Go) : ingestion typée,
+nettoyage, deux axes d'agrégation avec jointures de dimension, et un
+benchmark pandas vs Spark qui situe le seuil de bascule à ~36 % du corpus.
+
+**Prérequis :** Python 3.12+, JDK 21, ~3 Go d'espace disque, 8 Go de RAM.
+Testé sous WSL2 (Ubuntu). Sous Windows natif, Spark nécessite
+`winutils.exe` et `hadoop.dll` dans `HADOOP_HOME`.
+
 ## 1. Contexte et question traitée
 
 Projet technique de M1 Informatique : construire un pipeline batch
@@ -11,8 +19,8 @@ un moteur distribué devient-il réellement plus rapide qu'un outil
 mono-machine (pandas) sur la même machine, et pourquoi ?**
 
 Le dataset (GDELT 2.0, événements géopolitiques quotidiens) sert de
-prétexte volumétrique et de terrain pour deux décisions d'ingénierie
-concrètes : une jointure de dimension avec un choix de stratégie
+terrain pour deux décisions d'ingénierie concrètes : une jointure de
+dimension avec un choix de stratégie
 explicite (broadcast) et sa justification mesurée, et une normalisation
 de référentiel face à des incohérences de codes pays réelles, découvertes
 en cours de route plutôt que supposées.
@@ -77,8 +85,8 @@ en cours de route plutôt que supposées.
    - Axe 2 — interactions entre pays acteurs : `Actor1CountryCode` et
      `Actor2CountryCode` (CAMEO) rapprochés de la classification
      manuelle de `src/cameo_country_types.py` (pays / région /
-     territoire), filtrés à `entity_type == "pays"` des deux côtés (le
-     taux d'exclusion, 78,6 %, est affiché, pas appliqué en silence).
+     territoire), filtrés à `entity_type == "pays"` des deux côtés
+     (21,4 % conservés, taux affiché, pas appliqué en silence).
 5. **Benchmark** (`src/benchmark.py`) : cinq comparaisons mesurées et
    consignées dans `report/mesures.md` — voir sections 4 et 5.
 
@@ -121,9 +129,37 @@ machine à 7,6 Go de RAM).
 | Broadcast hash join explicite vs sort-merge forcé (même jointure) | ~4,8 s / 143 tâches vs ~5,4 s / 228 tâches, en régime stable |
 | Normalisation FIPS (RB, YI → RI), axe 1 | 1 420 → 2 941 événements Serbie (+1 521) |
 | Filtre `entity_type == "pays"`, axe 2 | 572 425 conservés sur 2 675 819 (21,4 %) |
+| Effet week-end | 102 313 événements le mardi 4 août contre 54 796 le dimanche 9 |
+| Rétrospection médiatique | 17 213 événements datés d'un an plus tôt, ~700/jour, uniformément répartis |
 
 Détail complet, commandes exactes et repérage des trois exécutions par
 mesure (là où c'est fait) : `report/mesures.md`.
+
+### Ce que produit le pipeline
+
+Sortie réelle de `python src/transform.py`, lue depuis
+`data/processed/aggregates/` :
+
+Axe 1 — les 5 pays les plus couverts (nombre d'événements, tous jours
+cumulés) :
+
+| Code | Pays | Événements |
+|---|---|---|
+| US | United States | 837 338 |
+| IN | India | 164 363 |
+| UK | United Kingdom | 142 491 |
+| NI | Nigeria | 110 409 |
+| IS | Israel | 97 936 |
+
+Axe 2 — les 5 paires d'acteurs les plus fréquentes :
+
+| Actor1 | Actor2 | Événements | Tonalité moyenne |
+|---|---|---|---|
+| USA | USA | 64 656 | -2,472 |
+| USA | IRN | 8 928 | -3,458 |
+| RUS | UKR | 8 707 | -5,135 |
+| UKR | RUS | 8 429 | -4,959 |
+| IRN | USA | 8 261 | -3,547 |
 
 ## 5. Analyse
 
