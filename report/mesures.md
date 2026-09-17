@@ -463,16 +463,37 @@ volumétrie) : pas de coût de démarrage comparable, mais aucune parallélisati
 non plus — le travail croît linéairement, sans plafond de coût fixe pour
 l'amortir.
 
-**Seuil** : régression linéaire sur les 3 points mesurés donne
-temps_pandas ≈ 83,08 × v + 0,27 et temps_spark ≈ 29,32 × v + 19,42 (v en
-fraction du corpus, temps en secondes) ; intersection à v ≈ 0,356, soit
-**environ 36% du corpus**. Cette valeur est une extrapolation à partir de
-3 points seuls (pas de mesure directe à 30-40%), sans répétition pour
-lisser le bruit : à traiter comme un ordre de grandeur ("entre 10% et
-100%, plus proche du tiers que de la moitié"), pas comme un seuil
-mesuré au point près. Une mesure directe à 20/30/40% resserrerait
-l'intervalle, non faite ici par souci de temps d'exécution total du
-benchmark.
+**Seuil, resserré par mesure directe — 18 septembre 2026** : une première
+régression sur les 3 points 1%/10%/100% donnait ~36% par extrapolation
+(sans mesure entre 10% et 100%). Mesure directe à 25%, 35% et 45%,
+une exécution chacune, pour remplacer l'extrapolation par un intervalle
+réellement observé :
+
+```bash
+python src/benchmark.py --comparisons 5 --volumetries 0.25,0.35,0.45
+```
+
+Volumétrie 25% (720 fichiers) : Spark (froid) 28,22 s / 240 groupes ;
+pandas 21,89 s / 240 groupes / pic mémoire 943,6 Mo. pandas devant.
+
+Volumétrie 35% (1008 fichiers) : Spark (froid) 27,79 s / 243 groupes ;
+pandas 26,45 s / 243 groupes / pic mémoire 1 226,9 Mo. pandas encore
+devant, mais l'écart s'est réduit à 1,34 s (contre 6,33 s à 25%).
+
+Volumétrie 45% (1296 fichiers) : Spark (froid) 30,10 s / 244 groupes ;
+pandas 34,92 s / 244 groupes / pic mémoire 1 614,3 Mo. Spark devant,
+écart de 4,82 s.
+
+**Le seuil est donc entre 35% et 45% du corpus**, pas ~36% comme le
+suggérait la régression sur 3 points éloignés — l'extrapolation
+initiale se trouve juste en dessous de l'intervalle réellement observé,
+mais l'écart reste faible (elle n'était pas fausse, seulement moins
+précise). Interpolation linéaire entre les deux derniers points mesurés
+(35% : Spark - pandas = +1,34 s ; 45% : Spark - pandas = -4,82 s) :
+passage à zéro vers v ≈ 0,362, soit **~36% du corpus** — l'intervalle
+resserré confirme finalement la même valeur centrale que la régression
+initiale, avec cette fois un encadrement mesuré (35%-45%) plutôt
+qu'extrapolé.
 
 ## Typologie des codes acteurs — 17 septembre 2026
 
