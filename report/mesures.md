@@ -410,6 +410,70 @@ sur cluster, et choix qui reste correct même si une table de référence
 grossissait au-delà du seuil de 10 Mo, ce que le broadcast automatique
 seul ne garantirait pas.
 
+### Comparaison 5 — pandas vs PySpark, plusieurs volumétries, 18 septembre 2026
+
+Le livrable central du projet : même agrégation que la comparaison 1
+(comptage d'événements par `ActionGeo_CountryCode` sur les CSV bruts), en
+pandas et en PySpark, à 1%, 10% et 100% du corpus (29, 288 et 2880
+fichiers — sous-ensemble des N premiers fichiers par ordre chronologique,
+pas un tirage aléatoire de lignes, pour rester reproductible et mesurer
+un vrai coût d'E/S même à petite volumétrie). Contrairement aux
+comparaisons 1 à 4, chaque run est un sous-processus isolé et à froid
+(nouvelle JVM à chaque volumétrie côté Spark, pas la SparkSession
+partagée du reste de ce fichier) : voir `src/pandas_benchmark_worker.py`
+et `src/spark_benchmark_worker.py` pour le détail et sa justification.
+Une seule exécution par volumétrie ici, pas trois comme dans le reste du
+fichier — le coût cumulé (JVM froide x3 + lecture pandas complète x3)
+rendait 3 répétitions disproportionnées ; **cette mesure est donc plus
+bruitée que les comparaisons 1, 3 et 4, à prendre avec cette réserve.**
+
+```bash
+python src/benchmark.py --comparisons 5 --volumetries 0.01,0.10,1.0
+```
+
+Volumétrie 1% (29 fichiers) : Spark (froid) 18,28 s / 177 groupes ;
+pandas 0,88 s / 177 groupes / pic mémoire 143,9 Mo.
+
+Volumétrie 10% (288 fichiers) : Spark (froid) 23,93 s / 235 groupes ;
+pandas 8,82 s / 235 groupes / pic mémoire 389,1 Mo.
+
+Volumétrie 100% (2880 fichiers) : Spark (froid) 48,60 s / 249 groupes ;
+pandas 83,33 s / 249 groupes / pic mémoire 3 430,0 Mo (3,43 Go).
+
+Nombre de groupes identique des deux côtés aux trois volumétries
+(contrôle de cohérence, comme en comparaison 1). pandas n'a pas échoué à
+100% : 3,43 Go de pic sur une machine à 7,6 Go de RAM (voir `free -h`),
+largement sous la limite. L'hypothèse initiale d'un échec mémoire à 100%
+reposait sur une extrapolation naïve du pic à 1% (143,9 Mo x100 ≈ 14 Go) :
+extrapolation fausse, le pic ne scale pas linéairement avec le volume —
+une partie du coût mémoire de pandas est un plancher fixe par lecture
+(objets DataFrame, structures d'index, overhead par colonne) plutôt que
+strictement proportionnelle au nombre de lignes.
+
+**Comportement inverse entre les deux systèmes** : pandas gagne
+largement à 1% et 10% (0,88 s et 8,82 s contre 18,28 s et 23,93 s pour
+Spark), puis perd à 100% (83,33 s contre 48,60 s). Le temps Spark croît
+peu avec la volumétrie (18,28 -> 23,93 -> 48,60 s) : la majeure partie de
+son temps aux petites volumétries est un coût fixe de démarrage de la
+JVM (session Spark + planification, pas la lecture des données elles-
+mêmes), incompressible et payé une fois par run froid, quelle que soit la
+quantité de données. Le temps pandas croît presque proportionnellement
+au volume (0,88 -> 8,82 -> 83,33 s, quasi ×10 à chaque ×10 de
+volumétrie) : pas de coût de démarrage comparable, mais aucune parallélisation
+non plus — le travail croît linéairement, sans plafond de coût fixe pour
+l'amortir.
+
+**Seuil** : régression linéaire sur les 3 points mesurés donne
+temps_pandas ≈ 83,08 × v + 0,27 et temps_spark ≈ 29,32 × v + 19,42 (v en
+fraction du corpus, temps en secondes) ; intersection à v ≈ 0,356, soit
+**environ 36% du corpus**. Cette valeur est une extrapolation à partir de
+3 points seuls (pas de mesure directe à 30-40%), sans répétition pour
+lisser le bruit : à traiter comme un ordre de grandeur ("entre 10% et
+100%, plus proche du tiers que de la moitié"), pas comme un seuil
+mesuré au point près. Une mesure directe à 20/30/40% resserrerait
+l'intervalle, non faite ici par souci de temps d'exécution total du
+benchmark.
+
 ## Typologie des codes acteurs — 17 septembre 2026
 
 CAMEO.country.txt mélange sous un même référentiel de 261 codes à 3
