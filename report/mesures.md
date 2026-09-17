@@ -153,6 +153,53 @@ placés en tête de fichier par tri d'ID. Volume négligeable (0,03 %), mais à
 traiter par un filtre de fenêtre temporelle documenté plutôt qu'ignoré
 silencieusement.
 
+### Lignes exclues par le filtre de fenêtre temporelle — 17 septembre 2026
+
+`clean.py` (voir section Benchmarks) filtre sur `SQLDATE` et affiche
+**35 086 lignes supprimées** sur les 2880 fichiers. Ce chiffre n'était pas
+expliqué jusqu'ici. Distribution par mois de `SQLDATE` sur l'ensemble des
+2880 fichiers (pas seulement le 1er août, contrairement à la section
+précédente) :
+
+```bash
+cut -f2 data/raw/*.export.CSV | cut -c1-6 | sort | uniq -c | sort -rn
+```
+
+| Mois (AAAAMM) | Occurrences | Interprétation |
+|---|---|---|
+| 202608 | 2 675 819 | fenêtre |
+| 202607 | 17 327 | débordement de fenêtre |
+| 202508 | 17 213 | rétrospection à un an |
+| 201608 | 530 | — |
+| 201609 | 16 | — |
+
+Somme des lignes hors fenêtre : 17 327 + 17 213 + 530 + 16 = **35 086**,
+identique au compte de `clean.py`. Les lignes 201608/201609 recoupent les
+enregistrements de 2016 déjà repérés plus haut sur l'échantillon du 1er
+août (`GlobalEventID` très bas, rediffusion d'anciens enregistrements).
+
+Le groupe 202508 (17 213 lignes, le deuxième en volume après la fenêtre
+elle-même) mérite un examen séparé : uniforme dans le temps, ou concentré
+sur quelques jours de téléchargement (auquel cas ce serait un incident de
+flux plutôt qu'un phénomène structurel) ?
+
+```bash
+awk -F'\t' '$2 ~ /^202508/ {print substr(FILENAME, 10, 8)}' data/raw/*.export.CSV | sort | uniq -c | sort -rn
+```
+
+→ 600 à 850 lignes par jour de téléchargement, sur les 30 jours de la
+fenêtre, sans pic isolé : réparti uniformément, donc structurel et non
+incident de flux ponctuel.
+
+Interprétation : GDELT date un événement à la date décrite dans l'article
+source, pas à la date de publication de cet article. Le flux quotidien
+contient donc en permanence des articles rétrospectifs qui renvoient à des
+faits antérieurs — ici, majoritairement des faits vieux d'un an (août
+2025). C'est une deuxième preuve, après l'effet week-end (voir plus haut),
+que ce corpus mesure la couverture de presse et non l'activité du monde :
+un article publié aujourd'hui peut décrire un fait ancien, et GDELT
+l'indexe à la date du fait, pas à celle de sa mise en couverture.
+
 ## Schéma et complétude des colonnes — 15 septembre 2026
 
 Schéma explicite des 61 colonnes défini dans `src/schema.py`, vérifié en
@@ -312,3 +359,90 @@ proche du temps sans cache — la variante "select puis cache" est proche de
 Décision : `clean.py` projette désormais les 12 colonnes avant tout
 comptage, sans cache — la variante la plus rapide, la plus simple, et
 indépendante d'un réglage de `spark.driver.memory`.
+
+## Typologie des codes acteurs — 17 septembre 2026
+
+CAMEO.country.txt mélange sous un même référentiel de 261 codes à 3
+lettres des pays, des zones non nationales (continents, régions
+géopolitiques, une ville) et des territoires dépendants ou à
+souveraineté disputée. Classification manuelle consignée dans
+`src/cameo_country_types.py` (décision de projet, pas une donnée
+téléchargée, donc dans src/ et non dans data/) : 193 codes pays, 40
+codes territoire, 28 codes region. Raisonnement détaillé dans la
+docstring du fichier.
+
+Mesure sur le Parquet consolidé (`data/processed/events`, 2 675 819
+événements), répartition d'Actor1CountryCode par catégorie :
+
+```bash
+python3 - << 'PY'
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, when
+from cameo_country_types import CAMEO_COUNTRY_TYPES
+
+spark = SparkSession.builder.master("local[*]").appName("mesure-actor1-types").getOrCreate()
+df = spark.read.parquet("data/processed/events")
+types_df = spark.createDataFrame(
+    [(code, etype) for code, (_, etype) in CAMEO_COUNTRY_TYPES.items()],
+    ["code", "entity_type"],
+)
+joined = df.join(types_df, df.Actor1CountryCode == types_df.code, "left")
+(
+    joined
+    .withColumn("bucket", when(col("Actor1CountryCode").isNull(), "null")
+                .otherwise(when(col("entity_type").isNull(), "code_inconnu")
+                           .otherwise(col("entity_type"))))
+    .groupBy("bucket").count().orderBy(col("count").desc())
+    .show(truncate=False)
+)
+PY
+```
+
+pays : 1 420 217 événements, 53,08 %
+null (Actor1CountryCode vide) : 1 191 880 événements, 44,54 %
+region : 38 207 événements, 1,43 %
+territoire : 24 337 événements, 0,91 %
+code_inconnu (non nul, absent des 261 codes CAMEO) : 1 178
+événements, 0,04 %
+
+Événements avec un Actor1CountryCode de type region ou territoire
+plutôt que pays (hors null, hors code_inconnu) : 62 544, soit 2,337 %
+du total.
+
+Détail du bucket code_inconnu :
+
+```bash
+python3 - << 'PY'
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+from cameo_country_types import CAMEO_COUNTRY_TYPES
+
+spark = SparkSession.builder.master("local[*]").appName("codes-inconnus").getOrCreate()
+df = spark.read.parquet("data/processed/events")
+types_df = spark.createDataFrame([(c,) for c in CAMEO_COUNTRY_TYPES], ["code"])
+(
+    df.filter(col("Actor1CountryCode").isNotNull())
+    .join(types_df, df.Actor1CountryCode == types_df.code, "left_anti")
+    .groupBy("Actor1CountryCode").count().orderBy(col("count").desc())
+    .show(truncate=False)
+)
+PY
+```
+
+SSD : 1178 occurrences — un seul code distinct dans tout le bucket.
+
+Interprétation : SSD est le code du Soudan du Sud, indépendant depuis
+2011. CAMEO.country.txt ne contient pas cette entrée : référentiel
+antérieur à l'indépendance, ou jamais mis à jour depuis. Ça explique
+la totalité du bucket code_inconnu — pas une erreur de saisie côté
+GDELT, un trou de couverture côté table de référence.
+
+La table de référence officielle ne couvre donc pas entièrement le
+flux : un seul code manquant, mais sur 2,7 M d'événements — pas un
+problème de volume, un trou ponctuel et identifié. SSD ajouté dans
+`src/cameo_country_types.py` comme "pays", avec un commentaire
+précisant que c'est un ajout de notre part et non une entrée recopiée
+de CAMEO.country.txt.
+
+Décision de filtrage par défaut non prise ici : mesure seule, comme
+demandé.
